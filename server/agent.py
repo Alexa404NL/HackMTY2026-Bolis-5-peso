@@ -41,7 +41,6 @@ Reglas según la entrada:
 6. "ACCIÓN guardar_meta": llama save_savings_goal.
 7. "ACCIÓN guardar_presupuesto": llama save_budget_plan.
 8. "ACCIÓN guardar_inversion": llama save_investment_plan.
-9. "ACCIÓN save_dashboard_layout": llama save_dashboard_config con widgets recibidos.
 El estado del perfilamiento se maneja internamente; no lo envíes.
 Al terminar, responde con UNA frase corta y cálida en español (máximo 15 palabras), sin cifras."""
 
@@ -117,6 +116,12 @@ def _con_mensaje(ui, texto):
 async def turn(t: Turno):
     if not (t.texto or t.action):
         raise HTTPException(422, "se requiere texto o action")
+    if t.action and t.action.get("name") == "save_dashboard_layout":
+        # Layout del grid: se guarda directo, sin LLM (el LLM no ve los widgets y guardaba []).
+        res = await app.state.mcp.call_tool("save_dashboard_config", {"widgets": t.action.get("widgets") or []})
+        if res.is_error:
+            raise HTTPException(502, "no se pudo guardar el dashboard")
+        return {"messages": []}
     conv = conversaciones.setdefault(
         t.conversation_id,
         {"mensajes": [{"role": "system", "content": SISTEMA}], "estado": {}, "goal_id": None, "ui": None},

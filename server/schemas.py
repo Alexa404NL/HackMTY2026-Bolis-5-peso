@@ -5,7 +5,7 @@ de esquema para garantizar consistencia entre el motor de tarjetas, los tools
 MCP y la capa A2UI.
 """
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 # ---------------------------------------------------------------------------
 # Tipos compartidos
@@ -13,6 +13,7 @@ from typing import Literal, TypedDict
 
 ModuleType = Literal["savings_goal", "budget", "investment"]
 DisplayMode = Literal["compact_summary", "chart_preview", "progress_tracker"]
+WidgetShape = Literal["square", "wide", "tall"]  # 2x2, 4x2, 2x4
 StatusColor = Literal["green", "yellow", "red"]
 
 
@@ -30,6 +31,12 @@ class WidgetInstance(TypedDict):
     display_mode: DisplayMode
     module_data_id: int | None # FK a la tabla del módulo (goal_id, budget_id, etc.)
     summary: WidgetSummary
+    x: NotRequired[int]        # columna en el grid de 4 columnas
+    y: NotRequired[int]        # fila
+    shape: NotRequired[WidgetShape]
+    # Listo para mostrar, no se persiste (lo reconstruye get_dashboard_config):
+    # {kpi: {valor, etiqueta}, tono, progreso, detalle, serie: {valores, etiquetas}, desglose, filas}
+    preview: NotRequired[dict[str, Any] | None]
 
 
 class DashboardState(TypedDict):

@@ -16,7 +16,8 @@ import '../widgets/widget_cards.dart';
 /// 1. Estado vacío → CTA para agregar el primer widget
 /// 2. Modal de selección → navega a la pantalla del módulo elegido
 /// 3. El módulo regresa un widget JSON → se agrega a la lista y se persiste
-/// 4. Reordenamiento via drag & drop con ReorderableListView
+/// 4. Mantener presionado → modo edición: arrastrar en snap grid de 4 columnas,
+///    cambiar forma (cuadrado / horizontal / vertical) y eliminar
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -24,10 +25,18 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
+class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProviderStateMixin {
+  static const _gap = 12.0;
+  static const _padding = 20.0;
+
   final List<WidgetInstance> _widgets = [];
   bool _cargando = false;
   Surface? _goalSurface;
+
+  bool _editando = false;
+  String? _arrastrandoId;
+  Offset _delta = Offset.zero;
+  late final _jiggle = AnimationController(vsync: this, duration: const Duration(milliseconds: 260));
 
   @override
   void initState() {
@@ -38,6 +47,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void dispose() {
     _goalSurface?.dispose();
+    _jiggle.dispose();
     super.dispose();
   }
 
@@ -57,7 +67,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             setState(() {
               _widgets.clear();
               _widgets.addAll(raw.map(WidgetInstance.fromJson));
-              _widgets.sort((a, b) => a.order.compareTo(b.order));
+              colocarLegacy(_widgets);
             });
           }
         }
@@ -68,9 +78,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     setState(() => _cargando = false);
   }
 
-  Future<void> _guardarOrden() async {
+  Future<void> _guardarLayout() async {
     try {
       final client = AgentClient();
+      for (var i = 0; i < _widgets.length; i++) {
+        _widgets[i].order = i;
+      }
       final payload = _widgets.map((w) => w.toJson()).toList();
       await client.sendTurn(action: {
         'name': 'save_dashboard_layout',
@@ -128,28 +141,59 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ...widgetJson,
       'order': _widgets.length,
     });
+    final (x, y) = primerHueco(_widgets, WidgetShape.square);
+    w
+      ..shape = WidgetShape.square
+      ..x = x
+      ..y = y;
     setState(() => _widgets.add(w));
-    _guardarOrden();
+    _guardarLayout();
   }
 
-  // ─── Reordenamiento ────────────────────────────────────────────────────────
+  // ─── Modo edición ──────────────────────────────────────────────────────────
 
-  void _onReorder(int oldIndex, int newIndex) {
-    HapticFeedback.lightImpact();
+  void _entrarEdicion() {
+    if (_editando) return;
+    HapticFeedback.mediumImpact();
+    _jiggle.repeat(reverse: true);
+    setState(() => _editando = true);
+  }
+
+  void _salirEdicion() {
+    _jiggle.stop();
+    setState(() => _editando = false);
+  }
+
+  void _terminarArrastre(WidgetInstance w, double paso) {
+    final x = ((w.x * paso + _delta.dx) / paso).round();
+    final y = ((w.y * paso + _delta.dy) / paso).round();
+    final movido = mover(_widgets, w, x, y);
     setState(() {
-      if (newIndex > oldIndex) newIndex--;
-      final item = _widgets.removeAt(oldIndex);
-      _widgets.insert(newIndex, item);
-      for (var i = 0; i < _widgets.length; i++) {
-        _widgets[i].order = i;
+      _arrastrandoId = null;
+      _delta = Offset.zero;
+    });
+    if (movido) {
+      HapticFeedback.lightImpact();
+      _guardarLayout();
+    }
+  }
+
+  void _cambiarForma(WidgetInstance w, WidgetShape s) {
+    if (w.shape == s) return;
+    HapticFeedback.selectionClick();
+    setState(() => cambiarForma(_widgets, w, s));
+    _guardarLayout();
+  }
+
+  void _eliminarWidget(WidgetInstance w) {
+    setState(() {
+      _widgets.remove(w);
+      if (_widgets.isEmpty) {
+        _editando = false;
+        _jiggle.stop();
       }
     });
-    _guardarOrden();
-  }
-
-  void _eliminarWidget(int index) {
-    setState(() => _widgets.removeAt(index));
-    _guardarOrden();
+    _guardarLayout();
   }
 
   // ─── Build ─────────────────────────────────────────────────────────────────
@@ -176,12 +220,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Expanded(
               child: _widgets.isEmpty
                   ? _buildEmptyState(t)
-                  : _buildWidgetList(),
+                  : _buildGrid(),
             ),
           ],
         ),
       ),
-      floatingActionButton: _widgets.isEmpty
+      floatingActionButton: _widgets.isEmpty || _editando
           ? null
           : FloatingActionButton.extended(
               onPressed: _agregarWidget,
@@ -201,40 +245,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
       padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
       child: Row(
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'BANORTE',
-                style: TextStyle(
-                  fontFamily: gotham,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
-                  letterSpacing: 2,
-                  color: BanorteColors.red,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'BANORTE',
+                  style: TextStyle(
+                    fontFamily: gotham,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    letterSpacing: 2,
+                    color: BanorteColors.red,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 2),
-              Text('Mi Dashboard', style: t.headlineMedium),
-            ],
+                const SizedBox(height: 2),
+                Text('Mi Dashboard', style: t.headlineMedium, maxLines: 1, overflow: TextOverflow.ellipsis),
+              ],
+            ),
           ),
-          const Spacer(),
-          if (_widgets.isNotEmpty)
+          const SizedBox(width: 12),
+          if (_editando)
+            FilledButton(
+              onPressed: _salirEdicion,
+              style: FilledButton.styleFrom(minimumSize: const Size(0, 36)),
+              child: const Text('Listo'),
+            )
+          else if (_widgets.isNotEmpty)
             Tooltip(
-              message: 'Mantén presionado un widget para reordenar',
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: BanorteColors.background2,
-                  borderRadius: BorderRadius.circular(99),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.swap_vert_rounded, size: 14, color: BanorteColors.gray),
-                    const SizedBox(width: 4),
-                    Text('Reordenar', style: TextStyle(fontSize: 12, color: BanorteColors.gray)),
-                  ],
+              message: 'Mantén presionado un widget para editar',
+              child: GestureDetector(
+                onTap: _entrarEdicion,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: BanorteColors.background2,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.open_with_rounded, size: 14, color: BanorteColors.gray),
+                      const SizedBox(width: 4),
+                      Text('Editar', style: TextStyle(fontSize: 12, color: BanorteColors.gray)),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -307,35 +362,89 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildWidgetList() {
-    return ReorderableListView.builder(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
-      itemCount: _widgets.length,
-      onReorder: _onReorder,
-      proxyDecorator: (child, index, animation) {
-        return AnimatedBuilder(
-          animation: animation,
-          child: child,
-          builder: (context, child) => Material(
-            elevation: 8,
-            borderRadius: BorderRadius.circular(24),
-            shadowColor: BanorteColors.darkGray.withValues(alpha: 0.2),
-            child: child,
+  Widget _buildGrid() {
+    return LayoutBuilder(builder: (context, box) {
+      final celda = (box.maxWidth - _padding * 2 - _gap * (gridCols - 1)) / gridCols;
+      final paso = celda + _gap;
+      final filas = filasOcupadas(_widgets) + (_editando ? 2 : 0);
+      // El widget arrastrado se pinta al final para quedar encima.
+      final orden = [
+        ..._widgets.where((w) => w.id != _arrastrandoId),
+        ..._widgets.where((w) => w.id == _arrastrandoId),
+      ];
+      return SingleChildScrollView(
+        // ponytail: sin scroll en modo edición (el arrastre es inmediato); agregar auto-scroll si el grid excede la pantalla
+        physics: _editando ? const NeverScrollableScrollPhysics() : null,
+        padding: const EdgeInsets.fromLTRB(_padding, 8, _padding, 100),
+        child: SizedBox(
+          height: filas * paso - _gap,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [for (final w in orden) _buildCelda(w, paso)],
           ),
-        );
-      },
-      itemBuilder: (context, index) {
-        final w = _widgets[index];
-        return Padding(
-          key: ValueKey(w.id),
-          padding: const EdgeInsets.only(bottom: 16),
-          child: buildWidgetCard(
-            w,
-            onTap: () => _abrirModulo(w),
-            onRemove: () => _eliminarWidget(index),
+        ),
+      );
+    });
+  }
+
+  Widget _buildCelda(WidgetInstance w, double paso) {
+    final arrastrando = w.id == _arrastrandoId;
+    final signo = _widgets.indexOf(w).isEven ? 1 : -1;
+    return AnimatedPositioned(
+      key: ValueKey(w.id),
+      duration: arrastrando ? Duration.zero : const Duration(milliseconds: 250),
+      curve: Curves.easeOutCubic,
+      left: w.x * paso + (arrastrando ? _delta.dx : 0),
+      top: w.y * paso + (arrastrando ? _delta.dy : 0),
+      width: w.shape.w * paso - _gap,
+      height: w.shape.h * paso - _gap,
+      // Long-press en ambos modos: entra a edición y arrastra en el mismo gesto.
+      child: GestureDetector(
+        onTap: _editando ? null : () => _abrirModulo(w),
+        onLongPressStart: (_) {
+          _entrarEdicion();
+          setState(() => _arrastrandoId = w.id);
+        },
+        onLongPressMoveUpdate: (d) => setState(() => _delta = d.offsetFromOrigin),
+        onLongPressEnd: (_) => _terminarArrastre(w, paso),
+        // En edición el arrastre es inmediato (mouse o dedo).
+        onPanStart: _editando ? (_) => setState(() => _arrastrandoId = w.id) : null,
+        onPanUpdate: _editando ? (d) => setState(() => _delta += d.delta) : null,
+        onPanEnd: _editando ? (_) => _terminarArrastre(w, paso) : null,
+        child: AnimatedBuilder(
+          animation: _jiggle,
+          builder: (context, child) => Transform.rotate(
+            angle: _editando && !arrastrando ? signo * (_jiggle.value - 0.5) * 0.02 : 0,
+            child: AnimatedScale(
+              scale: arrastrando ? 1.05 : 1,
+              duration: const Duration(milliseconds: 150),
+              child: child,
+            ),
           ),
-        );
-      },
+          child: Stack(
+            clipBehavior: Clip.none,
+            fit: StackFit.expand,
+            children: [
+              buildWidgetCard(w),
+              if (_editando && !arrastrando) ...[
+                Positioned(
+                  top: -6,
+                  left: -6,
+                  child: _BotonEliminar(onTap: () => _eliminarWidget(w)),
+                ),
+                Positioned(
+                  bottom: 8,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: _SelectorForma(actual: w.shape, onChanged: (s) => _cambiarForma(w, s)),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -349,6 +458,70 @@ class _DashboardScreenState extends State<DashboardScreen> {
         await _abrirModuloInversion();
     }
   }
+}
+
+// ─── Controles de edición ────────────────────────────────────────────────────
+
+class _BotonEliminar extends StatelessWidget {
+  const _BotonEliminar({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        label: 'Eliminar widget',
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            width: 28,
+            height: 28,
+            decoration: const BoxDecoration(color: BanorteColors.darkGray, shape: BoxShape.circle),
+            child: const Icon(Icons.remove_rounded, size: 18, color: BanorteColors.white),
+          ),
+        ),
+      );
+}
+
+class _SelectorForma extends StatelessWidget {
+  const _SelectorForma({required this.actual, required this.onChanged});
+  final WidgetShape actual;
+  final ValueChanged<WidgetShape> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: BanorteColors.darkGray.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(99),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final (s, icon, label) in const [
+              (WidgetShape.square, Icons.crop_square_rounded, 'Cuadrado'),
+              (WidgetShape.wide, Icons.crop_16_9_rounded, 'Horizontal'),
+              (WidgetShape.tall, Icons.crop_portrait_rounded, 'Vertical'),
+            ])
+              Semantics(
+                button: true,
+                selected: s == actual,
+                label: label,
+                child: GestureDetector(
+                  onTap: () => onChanged(s),
+                  child: Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: s == actual ? BanorteColors.white : Colors.transparent,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(icon, size: 16, color: s == actual ? BanorteColors.darkGray : BanorteColors.white),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
 }
 
 // ─── Empty State ─────────────────────────────────────────────────────────────
