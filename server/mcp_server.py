@@ -10,15 +10,15 @@ Módulos:
   - dashboard    : configuración del dashboard y widgets (nuevo)
 """
 
+import asyncio
 import json
 import os
-import sqlite3
-from contextlib import closing
 from copy import deepcopy
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
+import asyncpg
+from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
 from mcp_types import CallToolResult, EmbeddedResource, TextContent, TextResourceContents, ToolAnnotations
 
@@ -29,7 +29,8 @@ import investment
 A2UI_MIME = "application/a2ui+json"
 SURFACE = "ahorro"
 CATALOGO = "banorte-ahorro/v1"
-DB = Path(os.environ.get("GOALS_DB", Path(__file__).parent / "data" / "goals.db"))
+# El agente lanza este servidor por stdio y el SDK no hereda su entorno: cargamos .env aquí.
+load_dotenv(Path(__file__).parent / ".env")
 USER_ID_DEFAULT = "default"
 
 mcp = MCPServer("banorte-ahorro")
@@ -198,121 +199,135 @@ def _aplicar(estado, respuestas):
 # --- Persistencia ---------------------------------------------------------------
 
 
-def _db():
-    DB.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB)
-    # Metas de ahorro (original)
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT, creado TEXT NOT NULL,"
-        " actualizado TEXT NOT NULL, estado TEXT NOT NULL, proyeccion TEXT NOT NULL)"
-    )
-    # Presupuestos (nuevo)
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS budgets (id INTEGER PRIMARY KEY AUTOINCREMENT, creado TEXT NOT NULL,"
-        " actualizado TEXT NOT NULL, estado TEXT NOT NULL, plan TEXT NOT NULL)"
-    )
-    # Inversiones (nuevo)
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS investments (id INTEGER PRIMARY KEY AUTOINCREMENT, creado TEXT NOT NULL,"
-        " actualizado TEXT NOT NULL, estado TEXT NOT NULL, plan TEXT NOT NULL)"
-    )
-    # Dashboard config (nuevo)
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS dashboard_config (user_id TEXT PRIMARY KEY, actualizado TEXT NOT NULL,"
-        " widgets TEXT NOT NULL)"
-    )
-    return con
+# Postgres (Timescale) usado como almacén de documentos: una tabla, un JSONB por documento.
+# Colecciones: metas {estado, proyeccion} · presupuestos / inversiones {estado, plan} · dashboard (clave=user_id) {widgets}
+
+ESQUEMA = """
+CREATE TABLE IF NOT EXISTS documentos (
+  coleccion   text        NOT NULL,
+  id          bigserial,
+  clave       text,
+  datos       jsonb       NOT NULL,
+  creado      timestamptz NOT NULL DEFAULT now(),
+  actualizado timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (coleccion, id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS documentos_clave ON documentos (coleccion, clave) WHERE clave IS NOT NULL;
+"""
+
+_pool: asyncpg.Pool | None = None
+_pool_lock = asyncio.Lock()
 
 
-def _ahora():
-    return datetime.now(timezone.utc).isoformat()
+async def _jsonb(con):
+    await con.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
 
-# --- Helpers de persistencia: Metas de ahorro ---
-
-def db_insertar(estado, proyeccion):
-    with closing(_db()) as con, con:
-        cur = con.execute(
-            "INSERT INTO goals (creado, actualizado, estado, proyeccion) VALUES (?, ?, ?, ?)",
-            (_ahora(), _ahora(), json.dumps(estado), json.dumps(proyeccion)),
-        )
-        return cur.lastrowid
-
-
-def db_actualizar(goal_id, estado, proyeccion):
-    with closing(_db()) as con, con:
-        cur = con.execute(
-            "UPDATE goals SET actualizado = ?, estado = ?, proyeccion = ? WHERE id = ?",
-            (_ahora(), json.dumps(estado), json.dumps(proyeccion), goal_id),
-        )
-        if cur.rowcount == 0:
-            raise ValueError(f"la meta {goal_id} no existe")
+async def _db() -> asyncpg.Pool:
+    """Pool perezoso: se abre y crea el esquema la primera vez que algo toca la BD."""
+    global _pool
+    async with _pool_lock:
+        if _pool is None:
+            url = os.environ.get("DATABASE_URL")
+            if not url:
+                raise RuntimeError("falta DATABASE_URL en server/.env")
+            _pool = await asyncpg.create_pool(url, min_size=1, max_size=5, init=_jsonb)
+            await _pool.execute(ESQUEMA)
+    return _pool
 
 
-def db_leer(goal_id):
-    with closing(_db()) as con:
-        fila = con.execute("SELECT id, creado, actualizado, estado, proyeccion FROM goals WHERE id = ?", (goal_id,)).fetchone()
+def _id(valor):
+    """Los ids llegan de JSON/LLM (int o str); un id inválido equivale a documento inexistente."""
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _doc(fila):
     if fila is None:
         return None
-    return {"id": fila[0], "creado": fila[1], "actualizado": fila[2], "estado": json.loads(fila[3]), "proyeccion": json.loads(fila[4])}
+    return {"id": fila["id"], "creado": fila["creado"].isoformat(), "actualizado": fila["actualizado"].isoformat(), **fila["datos"]}
 
 
-# --- Helpers de persistencia: Presupuestos ---
-
-def db_insertar_budget(estado, plan):
-    with closing(_db()) as con, con:
-        cur = con.execute(
-            "INSERT INTO budgets (creado, actualizado, estado, plan) VALUES (?, ?, ?, ?)",
-            (_ahora(), _ahora(), json.dumps(estado), json.dumps(plan)),
-        )
-        return cur.lastrowid
+async def doc_insertar(coleccion: str, datos: dict) -> int:
+    return await (await _db()).fetchval(
+        "INSERT INTO documentos (coleccion, datos) VALUES ($1, $2) RETURNING id", coleccion, datos
+    )
 
 
-def db_leer_budget(budget_id):
-    with closing(_db()) as con:
-        fila = con.execute("SELECT id, creado, actualizado, estado, plan FROM budgets WHERE id = ?", (budget_id,)).fetchone()
-    if fila is None:
+async def doc_actualizar(coleccion: str, id, datos: dict) -> bool:
+    if (id := _id(id)) is None:
+        return False
+    estado = await (await _db()).execute(
+        "UPDATE documentos SET datos = $3, actualizado = now() WHERE coleccion = $1 AND id = $2", coleccion, id, datos
+    )
+    return estado != "UPDATE 0"
+
+
+async def doc_leer(coleccion: str, id) -> dict | None:
+    if (id := _id(id)) is None:
         return None
-    return {"id": fila[0], "creado": fila[1], "actualizado": fila[2], "estado": json.loads(fila[3]), "plan": json.loads(fila[4])}
+    return _doc(await (await _db()).fetchrow(
+        "SELECT id, creado, actualizado, datos FROM documentos WHERE coleccion = $1 AND id = $2", coleccion, id
+    ))
 
 
-# --- Helpers de persistencia: Inversiones ---
-
-def db_insertar_investment(estado, plan):
-    with closing(_db()) as con, con:
-        cur = con.execute(
-            "INSERT INTO investments (creado, actualizado, estado, plan) VALUES (?, ?, ?, ?)",
-            (_ahora(), _ahora(), json.dumps(estado), json.dumps(plan)),
-        )
-        return cur.lastrowid
+async def doc_leer_clave(coleccion: str, clave: str) -> dict | None:
+    return _doc(await (await _db()).fetchrow(
+        "SELECT id, creado, actualizado, datos FROM documentos WHERE coleccion = $1 AND clave = $2", coleccion, clave
+    ))
 
 
-def db_leer_investment(investment_id):
-    with closing(_db()) as con:
-        fila = con.execute("SELECT id, creado, actualizado, estado, plan FROM investments WHERE id = ?", (investment_id,)).fetchone()
-    if fila is None:
-        return None
-    return {"id": fila[0], "creado": fila[1], "actualizado": fila[2], "estado": json.loads(fila[3]), "plan": json.loads(fila[4])}
+async def doc_guardar_clave(coleccion: str, clave: str, datos: dict):
+    await (await _db()).execute(
+        "INSERT INTO documentos (coleccion, clave, datos) VALUES ($1, $2, $3)"
+        " ON CONFLICT (coleccion, clave) WHERE clave IS NOT NULL"
+        " DO UPDATE SET datos = excluded.datos, actualizado = now()",
+        coleccion, clave, datos,
+    )
 
 
-# --- Helpers de persistencia: Dashboard ---
+# --- Helpers por módulo (misma forma de retorno que antes) ---
 
-def db_leer_dashboard(user_id: str = USER_ID_DEFAULT) -> dict:
-    with closing(_db()) as con:
-        fila = con.execute("SELECT user_id, actualizado, widgets FROM dashboard_config WHERE user_id = ?", (user_id,)).fetchone()
-    if fila is None:
+async def db_insertar(estado, proyeccion):
+    return await doc_insertar("metas", {"estado": estado, "proyeccion": proyeccion})
+
+
+async def db_actualizar(goal_id, estado, proyeccion):
+    if not await doc_actualizar("metas", goal_id, {"estado": estado, "proyeccion": proyeccion}):
+        raise ValueError(f"la meta {goal_id} no existe")
+
+
+async def db_leer(goal_id):
+    return await doc_leer("metas", goal_id)
+
+
+async def db_insertar_budget(estado, plan):
+    return await doc_insertar("presupuestos", {"estado": estado, "plan": plan})
+
+
+async def db_leer_budget(budget_id):
+    return await doc_leer("presupuestos", budget_id)
+
+
+async def db_insertar_investment(estado, plan):
+    return await doc_insertar("inversiones", {"estado": estado, "plan": plan})
+
+
+async def db_leer_investment(investment_id):
+    return await doc_leer("inversiones", investment_id)
+
+
+async def db_leer_dashboard(user_id: str = USER_ID_DEFAULT) -> dict:
+    doc = await doc_leer_clave("dashboard", user_id)
+    if doc is None:
         return {"user_id": user_id, "widgets": []}
-    return {"user_id": fila[0], "actualizado": fila[1], "widgets": json.loads(fila[2])}
+    return {"user_id": user_id, "actualizado": doc["actualizado"], "widgets": doc.get("widgets", [])}
 
 
-def db_guardar_dashboard(config: dict, user_id: str = USER_ID_DEFAULT):
-    widgets_json = json.dumps(config.get("widgets", []))
-    with closing(_db()) as con, con:
-        con.execute(
-            "INSERT INTO dashboard_config (user_id, actualizado, widgets) VALUES (?, ?, ?)"
-            " ON CONFLICT(user_id) DO UPDATE SET actualizado = excluded.actualizado, widgets = excluded.widgets",
-            (user_id, _ahora(), widgets_json),
-        )
+async def db_guardar_dashboard(config: dict, user_id: str = USER_ID_DEFAULT):
+    await doc_guardar_clave("dashboard", user_id, {"widgets": config.get("widgets", [])})
 
 
 # --- Tools ----------------------------------------------------------------------
@@ -360,7 +375,7 @@ def simulate_projection(estado: dict[str, Any]) -> CallToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True))
-def update_savings_goal(
+async def update_savings_goal(
     estado: dict[str, Any], cambios: list[Respuesta], goal_id: int | None = None
 ) -> CallToolResult:
     """Aplica cambios del usuario (ej. aportacion_periodica, plazo_meses) sobre la proyección ya generada y recalcula.
@@ -368,17 +383,17 @@ def update_savings_goal(
     estado = _aplicar(estado, cambios)
     p, componentes = _componentes_meta(estado, goal_id)
     if goal_id is not None:
-        db_actualizar(goal_id, estado, p)
+        await db_actualizar(goal_id, estado, p)
     datos = {"variante": p["variante"], "saldo_final": _elegido(p)["saldo_final"], "goal_id": goal_id, "estado": estado}
     return _resultado(datos, componentes, estado, goal_id)
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False))
-def save_savings_goal(estado: dict[str, Any], display_mode: str = "progress_tracker") -> CallToolResult:
+async def save_savings_goal(estado: dict[str, Any], display_mode: str = "progress_tracker") -> CallToolResult:
     """Guarda la meta de ahorro de forma persistente y regresa el resumen de la meta guardada."""
     estado = _aplicar(estado, None)
     p = cards.simulate_projection(estado)
-    goal_id = db_insertar(estado, p)
+    goal_id = await db_insertar(estado, p)
     _, componentes = _componentes_meta(estado, goal_id)
     e = _elegido(p)
     widget = {
@@ -493,11 +508,11 @@ def _preview_investment(plan):
     }
 
 
-def _hidratar(widget):
-    """Reconstruye el preview del widget desde el registro de su módulo (None si ya no existe)."""
+async def _hidratar(widget):
+    """Reconstruye el preview del widget desde el documento de su módulo (None si ya no existe)."""
     tipo, i = widget.get("module_type"), widget.get("module_data_id")
     lector = {"savings_goal": db_leer, "budget": db_leer_budget, "investment": db_leer_investment}.get(tipo)
-    r = lector(i) if lector and i is not None else None
+    r = await lector(i) if lector and i is not None else None
     if r is None:
         preview = None
     elif tipo == "savings_goal":
@@ -605,12 +620,12 @@ def simulate_budget_plan(estado: dict[str, Any]) -> CallToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False))
-def save_budget_plan(estado: dict[str, Any], display_mode: str = "compact_summary") -> CallToolResult:
+async def save_budget_plan(estado: dict[str, Any], display_mode: str = "compact_summary") -> CallToolResult:
     """Guarda el plan de presupuesto de forma persistente y regresa el resumen y el widget listo para el Dashboard.
     display_mode: compact_summary | chart_preview | progress_tracker"""
     estado = _aplicar_budget(estado, None)
     plan = budget.simulate_budget(estado)
-    budget_id = db_insertar_budget(estado, plan)
+    budget_id = await db_insertar_budget(estado, plan)
     resumen = _componente(
         "resumen_presupuesto_guardado",
         "resumen_budget",
@@ -705,12 +720,12 @@ def simulate_investment_growth(estado: dict[str, Any]) -> CallToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False))
-def save_investment_plan(estado: dict[str, Any], display_mode: str = "chart_preview") -> CallToolResult:
+async def save_investment_plan(estado: dict[str, Any], display_mode: str = "chart_preview") -> CallToolResult:
     """Guarda el plan de inversión de forma persistente y regresa el resumen y el widget listo para el Dashboard.
     display_mode: compact_summary | chart_preview | progress_tracker"""
     estado = _aplicar_investment(estado, None)
     plan = investment.simulate_investment(estado)
-    investment_id = db_insertar_investment(estado, plan)
+    investment_id = await db_insertar_investment(estado, plan)
     resumen = _componente(
         "resumen_inversion_guardada",
         "resumen_inv",
@@ -741,11 +756,11 @@ def save_investment_plan(estado: dict[str, Any], display_mode: str = "chart_prev
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True))
-def get_dashboard_config(user_id: str = USER_ID_DEFAULT) -> CallToolResult:
+async def get_dashboard_config(user_id: str = USER_ID_DEFAULT) -> CallToolResult:
     """Lee la configuración actual del Dashboard (lista de widgets y su orden).
     Si no existe, regresa un Dashboard vacío."""
-    config = db_leer_dashboard(user_id)
-    widgets = [_hidratar(w) for w in config.get("widgets", [])]
+    config = await db_leer_dashboard(user_id)
+    widgets = list(await asyncio.gather(*(_hidratar(w) for w in config.get("widgets", []))))
     if not widgets:
         comp = _componente("dashboard_vacio", "dashboard")
         return _resultado_modulo({"vacio": True, "widgets": []}, [comp], "dashboard")
@@ -754,7 +769,7 @@ def get_dashboard_config(user_id: str = USER_ID_DEFAULT) -> CallToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True))
-def save_dashboard_config(widgets: list[dict[str, Any]], user_id: str = USER_ID_DEFAULT) -> CallToolResult:
+async def save_dashboard_config(widgets: list[dict[str, Any]], user_id: str = USER_ID_DEFAULT) -> CallToolResult:
     """Guarda el layout completo del Dashboard (incluido el nuevo orden de widgets tras un reordenamiento).
     Sobreescribe la configuración anterior — es idempotente si se manda el mismo payload."""
     # Solo se persiste el layout; el preview se reconstruye al leer (get_dashboard_config)
@@ -763,13 +778,13 @@ def save_dashboard_config(widgets: list[dict[str, Any]], user_id: str = USER_ID_
     for i, w in enumerate(widgets):
         w["order"] = i
     config = {"user_id": user_id, "widgets": widgets}
-    db_guardar_dashboard(config, user_id)
+    await db_guardar_dashboard(config, user_id)
     comp = _componente("dashboard_layout", "dashboard", widgets=widgets)
     return _resultado_modulo({"guardado": True, "widgets": widgets}, [comp], "dashboard")
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False))
-def add_widget(
+async def add_widget(
     module_type: str,
     title: str,
     module_data_id: int,
@@ -781,7 +796,7 @@ def add_widget(
     module_type: savings_goal | budget | investment
     summary: {primary_metric, secondary_metric, status_color}
     display_mode: compact_summary | chart_preview | progress_tracker"""
-    config = db_leer_dashboard(user_id)
+    config = await db_leer_dashboard(user_id)
     widgets = config.get("widgets", [])
     import uuid
     nuevo_widget = {
@@ -794,7 +809,7 @@ def add_widget(
         "summary": summary,
     }
     widgets.append(nuevo_widget)
-    db_guardar_dashboard({"user_id": user_id, "widgets": widgets}, user_id)
+    await db_guardar_dashboard({"user_id": user_id, "widgets": widgets}, user_id)
     comp = _componente("dashboard_layout", "dashboard", widgets=widgets)
     return _resultado_modulo({"agregado": True, "widget": nuevo_widget, "widgets": widgets}, [comp], "dashboard")
 
