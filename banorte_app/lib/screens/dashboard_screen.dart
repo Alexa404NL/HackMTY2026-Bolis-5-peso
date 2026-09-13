@@ -5,7 +5,6 @@ import '../a2ui/surface.dart';
 import '../agent_client.dart';
 import '../models/dashboard_model.dart';
 import '../screens/budget_screen.dart';
-import '../screens/detalle_widget_screen.dart';
 import '../screens/investment_screen.dart';
 import '../theme.dart';
 import '../widgets/add_widget_modal.dart';
@@ -27,7 +26,7 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProviderStateMixin {
-  static const _gap = 8.0;
+  static const _gap = 12.0;
   static const _padding = 20.0;
 
   final List<WidgetInstance> _widgets = [];
@@ -401,8 +400,7 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
       height: w.shape.h * paso - _gap,
       // Long-press en ambos modos: entra a edición y arrastra en el mismo gesto.
       child: GestureDetector(
-        // Fuera de edición abre el detalle; en edición abre la hoja de forma / eliminar.
-        onTap: () => _editando ? _editarWidget(w) : _abrirDetalle(w),
+        onTap: _editando ? null : () => _abrirModulo(w),
         onLongPressStart: (_) {
           _entrarEdicion();
           setState(() => _arrastrandoId = w.id);
@@ -423,134 +421,107 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
               child: child,
             ),
           ),
-          child: buildWidgetCard(w),
+          child: Stack(
+            clipBehavior: Clip.none,
+            fit: StackFit.expand,
+            children: [
+              buildWidgetCard(w),
+              if (_editando && !arrastrando) ...[
+                Positioned(
+                  top: -6,
+                  left: -6,
+                  child: _BotonEliminar(onTap: () => _eliminarWidget(w)),
+                ),
+                Positioned(
+                  bottom: 8,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: _SelectorForma(actual: w.shape, onChanged: (s) => _cambiarForma(w, s)),
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Future<void> _abrirDetalle(WidgetInstance w) async {
-    final resultado = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => DetalleWidgetScreen(instancia: w)),
-    );
-    if (!mounted) return;
-    if (resultado == 'eliminar') {
-      _eliminarWidget(w);
-    } else {
-      // Lo editado en el detalle (ej. la meta) se refleja al rehidratar el dashboard.
-      await _cargarDashboard();
-    }
-  }
-
-  Future<void> _editarWidget(WidgetInstance w) async {
-    final accion = await showModalBottomSheet<Object>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _HojaEdicion(instancia: w),
-    );
-    if (!mounted) return;
-    switch (accion) {
-      case final WidgetShape s:
-        _cambiarForma(w, s);
-      case 'eliminar':
-        _eliminarWidget(w);
+  Future<void> _abrirModulo(WidgetInstance w) async {
+    switch (w.moduleType) {
+      case ModuleType.savingsGoal:
+        await _abrirModuloMeta();
+      case ModuleType.budget:
+        await _abrirModuloBudget();
+      case ModuleType.investment:
+        await _abrirModuloInversion();
     }
   }
 }
 
 // ─── Controles de edición ────────────────────────────────────────────────────
 
-/// Hoja inferior de edición: regresa la [WidgetShape] elegida o `'eliminar'`.
-class _HojaEdicion extends StatelessWidget {
-  const _HojaEdicion({required this.instancia});
-  final WidgetInstance instancia;
+class _BotonEliminar extends StatelessWidget {
+  const _BotonEliminar({required this.onTap});
+  final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context).textTheme;
-    return Container(
-      decoration: const BoxDecoration(
-        color: BanorteColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-      ),
-      padding: EdgeInsets.fromLTRB(24, 16, 24, MediaQuery.of(context).padding.bottom + 24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(color: BanorteColors.content5, borderRadius: BorderRadius.circular(99)),
-            ),
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        label: 'Eliminar widget',
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            width: 28,
+            height: 28,
+            decoration: const BoxDecoration(color: BanorteColors.darkGray, shape: BoxShape.circle),
+            child: const Icon(Icons.remove_rounded, size: 18, color: BanorteColors.white),
           ),
-          const SizedBox(height: 20),
-          Text(instancia.title, style: t.headlineMedium, maxLines: 1, overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 4),
-          Text('Elige la forma del widget', style: t.bodyMedium),
-          const SizedBox(height: 16),
-          Row(children: [
+        ),
+      );
+}
+
+class _SelectorForma extends StatelessWidget {
+  const _SelectorForma({required this.actual, required this.onChanged});
+  final WidgetShape actual;
+  final ValueChanged<WidgetShape> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: BanorteColors.darkGray.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(99),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
             for (final (s, icon, label) in const [
               (WidgetShape.square, Icons.crop_square_rounded, 'Cuadrado'),
               (WidgetShape.wide, Icons.crop_16_9_rounded, 'Horizontal'),
               (WidgetShape.tall, Icons.crop_portrait_rounded, 'Vertical'),
             ])
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: _OpcionForma(
-                    icon: icon,
-                    label: label,
-                    seleccionada: s == instancia.shape,
-                    onTap: () => Navigator.pop(context, s),
+              Semantics(
+                button: true,
+                selected: s == actual,
+                label: label,
+                child: GestureDetector(
+                  onTap: () => onChanged(s),
+                  child: Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: s == actual ? BanorteColors.white : Colors.transparent,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(icon, size: 16, color: s == actual ? BanorteColors.darkGray : BanorteColors.white),
                   ),
                 ),
               ),
-          ]),
-          const SizedBox(height: 16),
-          OutlinedButton.icon(
-            onPressed: () => Navigator.pop(context, 'eliminar'),
-            icon: const Icon(Icons.delete_outline_rounded, color: BanorteColors.red),
-            label: const Text('Eliminar widget', style: TextStyle(color: BanorteColors.red)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _OpcionForma extends StatelessWidget {
-  const _OpcionForma({required this.icon, required this.label, required this.seleccionada, required this.onTap});
-  final IconData icon;
-  final String label;
-  final bool seleccionada;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = seleccionada ? BanorteColors.red : BanorteColors.darkGray;
-    return Semantics(
-      button: true,
-      selected: seleccionada,
-      child: Material(
-        color: seleccionada ? BanorteColors.red.withValues(alpha: 0.1) : BanorteColors.background2,
-        borderRadius: BorderRadius.circular(16),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(16),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            child: Column(children: [
-              Icon(icon, color: color),
-              const SizedBox(height: 6),
-              Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color)),
-            ]),
-          ),
+          ],
         ),
-      ),
-    );
-  }
+      );
 }
 
 // ─── Empty State ─────────────────────────────────────────────────────────────

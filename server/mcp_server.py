@@ -814,29 +814,5 @@ async def add_widget(
     return _resultado_modulo({"agregado": True, "widget": nuevo_widget, "widgets": widgets}, [comp], "dashboard")
 
 
-@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True))
-async def get_module_detail(module_type: str, module_data_id: int) -> CallToolResult:
-    """Regresa el detalle guardado de un widget del Dashboard (resumen + plan o proyección) listo para mostrar.
-    module_type: savings_goal | budget | investment. Si el registro no existe regresa encontrado=false sin UI."""
-    if module_type == "savings_goal" and (r := await db_leer(module_data_id)):
-        _, componentes = _componentes_meta(r["estado"], r["id"])
-        return _resultado({"encontrado": True, "goal_id": r["id"], "estado": r["estado"]}, componentes, r["estado"], r["id"])
-    if module_type == "budget" and (r := await db_leer_budget(module_data_id)):
-        plan = r["plan"]
-        componentes = [
-            _componente("resumen_presupuesto_guardado", "resumen_budget", budget_id=r["id"], guardado=True, **plan),
-            _componente("plan_presupuesto", "plan_budget", guardado=True, **plan),
-        ]
-        return _resultado_modulo({"encontrado": True, "budget_id": r["id"]}, componentes, "presupuesto", r["estado"], r["id"])
-    if module_type == "investment" and (r := await db_leer_investment(module_data_id)):
-        plan = r["plan"]
-        componentes = [
-            _componente("resumen_inversion_guardada", "resumen_inv", investment_id=r["id"], guardado=True, **plan),
-            _componente("plan_inversion", "plan_inv", guardado=True, **plan),
-        ]
-        return _resultado_modulo({"encontrado": True, "investment_id": r["id"]}, componentes, "inversion", r["estado"], r["id"])
-    return CallToolResult(content=[TextContent(type="text", text=json.dumps({"encontrado": False}))])
-
-
 if __name__ == "__main__":
     mcp.run()

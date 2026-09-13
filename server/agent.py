@@ -126,14 +126,6 @@ async def turn(t: Turno):
         if res.is_error:
             raise HTTPException(502, "no se pudo guardar el dashboard")
         return {"messages": []}
-    if t.action and t.action.get("name") == "ver_detalle":
-        # Detalle de un widget: lectura directa, sin LLM. Sin registro → sin mensajes (el cliente muestra el aviso).
-        res = await app.state.mcp.call_tool(
-            "get_module_detail",
-            {"module_type": t.action.get("module_type"), "module_data_id": t.action.get("module_data_id")},
-        )
-        _, ui = _leer_resultado(res)
-        return {"messages": [] if res.is_error else ui or []}
     conv = conversaciones.setdefault(
         t.conversation_id,
         {"mensajes": [{"role": "system", "content": SISTEMA}], "estado": {}, "goal_id": None, "ui": None},
