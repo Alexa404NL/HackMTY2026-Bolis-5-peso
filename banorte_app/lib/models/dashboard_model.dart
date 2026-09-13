@@ -20,7 +20,7 @@ enum WidgetShape {
   final int w, h;
 }
 
-const gridCols = 4;
+const gridCols = 8;
 
 /// Convierte el string del servidor al enum.
 ModuleType moduleTypeFrom(String s) => switch (s) {
@@ -90,18 +90,24 @@ class WidgetInstance {
   /// desglose, filas}). null = sin datos del módulo → la card usa [summary].
   final Map<String, dynamic>? preview;
 
-  factory WidgetInstance.fromJson(Map<String, dynamic> j) => WidgetInstance(
-        id: j['id'] as String,
-        moduleType: moduleTypeFrom(j['module_type'] as String? ?? 'savings_goal'),
-        title: j['title'] as String? ?? '',
-        order: (j['order'] as num?)?.toInt() ?? 0,
-        moduleDataId: (j['module_data_id'] as num?)?.toInt(),
-        summary: WidgetSummary.fromJson((j['summary'] as Map<String, dynamic>?) ?? {}),
-        x: (j['x'] as num?)?.toInt() ?? -1,
-        y: (j['y'] as num?)?.toInt() ?? -1,
-        shape: WidgetShape.values.asNameMap()[j['shape']] ?? WidgetShape.wide,
-        preview: j['preview'] as Map<String, dynamic>?,
-      );
+  factory WidgetInstance.fromJson(Map<String, dynamic> j) {
+    // Layouts guardados con el grid anterior de 4 columnas: se duplica la posición para conservar el acomodo.
+    final escala = ((j['cols'] as num?)?.toInt() ?? 4) < gridCols ? 2 : 1;
+    final x = (j['x'] as num?)?.toInt() ?? -1;
+    final y = (j['y'] as num?)?.toInt() ?? -1;
+    return WidgetInstance(
+      id: j['id'] as String,
+      moduleType: moduleTypeFrom(j['module_type'] as String? ?? 'savings_goal'),
+      title: j['title'] as String? ?? '',
+      order: (j['order'] as num?)?.toInt() ?? 0,
+      moduleDataId: (j['module_data_id'] as num?)?.toInt(),
+      summary: WidgetSummary.fromJson((j['summary'] as Map<String, dynamic>?) ?? {}),
+      x: x < 0 ? -1 : x * escala,
+      y: y < 0 ? -1 : y * escala,
+      shape: WidgetShape.values.asNameMap()[j['shape']] ?? WidgetShape.wide,
+      preview: j['preview'] as Map<String, dynamic>?,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -117,6 +123,7 @@ class WidgetInstance {
         'x': x,
         'y': y,
         'shape': shape.name,
+        'cols': gridCols,
         'preview': preview,
       };
 }
