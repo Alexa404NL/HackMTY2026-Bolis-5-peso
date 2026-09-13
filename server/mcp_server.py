@@ -391,8 +391,118 @@ def save_savings_goal(estado: dict[str, Any], display_mode: str = "progress_trac
             "secondary_metric": f"Meta: ${estado['monto_meta']:,.0f}",
             "status_color": "green",
         },
+        "preview": _preview_meta(estado, p),
     }
     return _resultado({"goal_id": goal_id, "widget": widget, "estado": estado}, componentes, estado, goal_id)
+
+
+# --- Preview de widgets del Dashboard (listo para mostrar) ---
+# Esquema: {kpi: {valor, etiqueta}, tono, progreso (0-1 | None), detalle,
+#           serie ({valores, etiquetas} | None), desglose [{nombre, texto, pct}], filas [{etiqueta, texto}]}
+
+
+def _pesos(n):
+    return f"${n:,.0f}"
+
+
+def _muestrear(serie, n=12):
+    """Reduce una serie mensual a ~n puntos equiespaciados (incluye el último) con su etiqueta de mes."""
+    idx = range(len(serie)) if len(serie) <= n else sorted({round(i * (len(serie) - 1) / (n - 1)) for i in range(n)})
+    return {"valores": [serie[i] for i in idx], "etiquetas": [f"Mes {i}" for i in idx]}
+
+
+def _preview_meta(estado, proyeccion):
+    e = _elegido(proyeccion)
+    meta = estado["monto_meta"]
+    # Dato principal: lo ahorrado hoy (aportación inicial); la proyección es secundaria.
+    ahorrado = estado["aportacion_inicial"]
+    progreso = min(1.0, ahorrado / meta) if meta else 0.0
+    proyectado = min(1.0, e["saldo_final"] / meta) if meta else 0.0
+    filas = [
+        {"etiqueta": "Aportación", "texto": f"{_pesos(estado['aportacion_periodica'])}/mes"},
+        {"etiqueta": "Plazo", "texto": f"{estado['plazo_meses']} meses"},
+    ]
+    return {
+        "kpi": {"valor": _pesos(ahorrado), "etiqueta": "ahorrado hoy"},
+        "tono": "green" if proyectado >= 1 else "yellow",
+        "chip": {"texto": f"Mes {e['mes_meta']}", "tono": "green"}
+        if e["mes_meta"] is not None
+        else {"texto": "No alcanza", "tono": "yellow"},
+        "progreso": round(progreso, 3),
+        "progreso_proyectado": round(proyectado, 3),
+        "meta_texto": _pesos(meta),
+        "proyectado_texto": _pesos(e["saldo_final"]),
+        "detalle": f"Meta {_pesos(meta)} en {estado['plazo_meses']} meses",
+        "serie": _muestrear(e["serie"]),
+        "desglose": [],
+        "filas": filas,
+    }
+
+
+def _preview_budget(plan):
+    ingreso = plan["ingreso_mensual"]
+    top = sorted(plan["categorias"], key=lambda c: c["monto"], reverse=True)
+    return {
+        "kpi": {"valor": _pesos(plan["balance_disponible"]), "etiqueta": "disponible"},
+        "tono": plan["status_color"],
+        "chip": {
+            "texto": {"green": "Saludable", "yellow": "Ajustado"}.get(plan["status_color"], "Déficit"),
+            "tono": plan["status_color"],
+        },
+        "progreso": round(min(1.0, plan["total_gastos"] / ingreso), 3) if ingreso else None,
+        "detalle": f"Gastas {_pesos(plan['total_gastos'])} de {_pesos(ingreso)}",
+        "gastos_texto": _pesos(plan["total_gastos"]),
+        "serie": None,
+        "desglose": [
+            {"nombre": c["nombre"], "corto": c["nombre"][:3], "texto": _pesos(c["monto"]), "pct": round(c["monto"] / ingreso, 3) if ingreso else 0}
+            for c in top
+        ],
+        "filas": [{"etiqueta": "Gastos fijos", "texto": _pesos(plan["gastos_fijos"])}],
+    }
+
+
+def _nombre_corto(nombre):
+    """'CETES / Pagaré Banorte' → 'CETES'; 'Fondos de Inversión Mixtos' → 'Fondos Mixtos'."""
+    return nombre.split(" / ")[0].split(" (")[0].replace("de Inversión ", "")
+
+
+def _preview_investment(plan):
+    signo = "+" if plan["rendimiento_porcentual"] >= 0 else ""
+    return {
+        "kpi": {"valor": f"{signo}{plan['rendimiento_porcentual']:.1f}%", "etiqueta": "rendimiento"},
+        "tono": "green" if plan["rendimiento_porcentual"] > 0 else "yellow",
+        "chip": {
+            "texto": f"{signo}{_pesos(plan['rendimiento_estimado_total'])}",
+            "tono": "green" if plan["rendimiento_porcentual"] > 0 else "yellow",
+        },
+        "progreso": None,
+        "detalle": f"Final {_pesos(plan['monto_final_proyectado'])}",
+        "total": _pesos(plan["monto_final_proyectado"]),
+        "instrumentos": [
+            {"nombre": _nombre_corto(i["nombre"]), "texto": f"{i['porcentaje']:.0f}%", "pct": round(i["porcentaje"] / 100, 3)}
+            for i in plan["instrumentos"]
+        ],
+        "serie": _muestrear(plan["serie_mensual"]),
+        "desglose": [],
+        "filas": [
+            {"etiqueta": "Aportado", "texto": _pesos(plan["capital_aportado_total"])},
+            {"etiqueta": "Ganancia", "texto": f"{signo}{_pesos(plan['rendimiento_estimado_total'])}"},
+        ],
+    }
+
+
+def _hidratar(widget):
+    """Reconstruye el preview del widget desde el registro de su módulo (None si ya no existe)."""
+    tipo, i = widget.get("module_type"), widget.get("module_data_id")
+    lector = {"savings_goal": db_leer, "budget": db_leer_budget, "investment": db_leer_investment}.get(tipo)
+    r = lector(i) if lector and i is not None else None
+    if r is None:
+        preview = None
+    elif tipo == "savings_goal":
+        preview = _preview_meta(r["estado"], r["proyeccion"])
+    else:
+        preview = (_preview_budget if tipo == "budget" else _preview_investment)(r["plan"])
+    return {**widget, "preview": preview}
 
 
 # =============================================================================
@@ -414,6 +524,8 @@ def _resultado_modulo(datos, componentes=None, superficie="ahorro", estado=None,
         value = {"estado": estado, "record_id": record_id}
         if "widget" in datos:
             value["widget"] = datos["widget"]
+        if "widgets" in datos:
+            value["widgets"] = datos["widgets"]
         mensajes = [
             {"version": "v0.9", "createSurface": {"surfaceId": superficie, "catalogId": CATALOGO}},
             {
@@ -514,6 +626,7 @@ def save_budget_plan(estado: dict[str, Any], display_mode: str = "compact_summar
             "secondary_metric": f"Gasto total: ${plan['total_gastos']:,.0f}",
             "status_color": plan["status_color"],
         },
+        "preview": _preview_budget(plan),
     }
     datos = {"budget_id": budget_id, "widget": widget, "estado": estado}
     return _resultado_modulo(datos, [resumen], "presupuesto", estado, budget_id)
@@ -614,6 +727,7 @@ def save_investment_plan(estado: dict[str, Any], display_mode: str = "chart_prev
             "secondary_metric": f"Final: ${plan['monto_final_proyectado']:,.0f}",
             "status_color": "green" if plan["rendimiento_porcentual"] > 0 else "yellow",
         },
+        "preview": _preview_investment(plan),
     }
     datos = {"investment_id": investment_id, "widget": widget, "estado": estado}
     return _resultado_modulo(datos, [resumen], "inversion", estado, investment_id)
@@ -629,7 +743,7 @@ def get_dashboard_config(user_id: str = USER_ID_DEFAULT) -> CallToolResult:
     """Lee la configuración actual del Dashboard (lista de widgets y su orden).
     Si no existe, regresa un Dashboard vacío."""
     config = db_leer_dashboard(user_id)
-    widgets = config.get("widgets", [])
+    widgets = [_hidratar(w) for w in config.get("widgets", [])]
     if not widgets:
         comp = _componente("dashboard_vacio", "dashboard")
         return _resultado_modulo({"vacio": True, "widgets": []}, [comp], "dashboard")
@@ -641,6 +755,8 @@ def get_dashboard_config(user_id: str = USER_ID_DEFAULT) -> CallToolResult:
 def save_dashboard_config(widgets: list[dict[str, Any]], user_id: str = USER_ID_DEFAULT) -> CallToolResult:
     """Guarda el layout completo del Dashboard (incluido el nuevo orden de widgets tras un reordenamiento).
     Sobreescribe la configuración anterior — es idempotente si se manda el mismo payload."""
+    # Solo se persiste el layout; el preview se reconstruye al leer (get_dashboard_config)
+    widgets = [{k: v for k, v in w.items() if k != "preview"} for w in widgets]
     # Re-asignar order según posición en la lista
     for i, w in enumerate(widgets):
         w["order"] = i
