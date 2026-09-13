@@ -60,7 +60,10 @@ def _a_openai(tool):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    servidor = StdioServerParameters(command=sys.executable, args=[str(AQUI / "mcp_server.py")], cwd=str(AQUI))
+    # env explícito: el SDK solo hereda PATH/HOME y en producción no hay .env (DATABASE_URL viene del entorno).
+    servidor = StdioServerParameters(
+        command=sys.executable, args=[str(AQUI / "mcp_server.py")], cwd=str(AQUI), env=dict(os.environ)
+    )
     async with Client(servidor) as mcp:
         tools = (await mcp.list_tools()).tools
         app.state.mcp = mcp
@@ -72,7 +75,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+    # En producción (Render) se define con el dominio del front en Vercel.
+    allow_origin_regex=os.environ.get("ALLOWED_ORIGIN_REGEX", r"http://(localhost|127\.0\.0\.1)(:\d+)?"),
     allow_methods=["*"],
     allow_headers=["*"],
 )

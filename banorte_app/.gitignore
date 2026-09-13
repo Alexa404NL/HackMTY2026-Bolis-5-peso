@@ -32,6 +32,8 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+# SDK de Flutter que clona vercel-build.sh
+.flutter/
 /coverage/
 
 # Symbolication related

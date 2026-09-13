@@ -1,0 +1,16 @@
+# Blueprint de Render para el backend (FastAPI + servidor MCP). Python 3.13 viene de server/.python-version.
+services:
+  - type: web
+    name: banorte-agente
+    runtime: python
+    rootDir: server
+    buildCommand: uv sync --frozen --no-dev
+    startCommand: uv run --no-dev uvicorn agent:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /docs
+    envVars:
+      - key: API_ROUTER
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ALLOWED_ORIGIN_REGEX
+        value: https://([a-z0-9-]+\.)*vercel\.app|http://localhost(:\d+)?
