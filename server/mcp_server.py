@@ -431,6 +431,7 @@ def _preview_meta(estado, proyeccion):
         "progreso": round(progreso, 3),
         "progreso_proyectado": round(proyectado, 3),
         "meta_texto": _pesos(meta),
+        "meta_valor": meta,
         "proyectado_texto": _pesos(e["saldo_final"]),
         "detalle": f"Meta {_pesos(meta)} en {estado['plazo_meses']} meses",
         "serie": _muestrear(e["serie"]),
@@ -478,6 +479,7 @@ def _preview_investment(plan):
         "progreso": None,
         "detalle": f"Final {_pesos(plan['monto_final_proyectado'])}",
         "total": _pesos(plan["monto_final_proyectado"]),
+        "perfil_texto": f"{plan['perfil_riesgo'].capitalize()} · {plan['plazo_meses']} meses",
         "instrumentos": [
             {"nombre": _nombre_corto(i["nombre"]), "texto": f"{i['porcentaje']:.0f}%", "pct": round(i["porcentaje"] / 100, 3)}
             for i in plan["instrumentos"]

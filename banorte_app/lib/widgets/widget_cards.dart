@@ -93,45 +93,37 @@ class _Meta extends StatelessWidget {
           ),
         );
 
-      // Barra de dinero: sólido = hoy, claro = proyectado, ▲ en la meta.
+      // Texto a la izquierda; proyección del saldo con línea punteada de la meta a la derecha.
       case WidgetShape.wide:
-        final proyectado = p.s('proyectado_texto');
+        final serie = p.serie;
         return _DashboardCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(children: [Expanded(child: _Caps(p.w.title)), ?p.chip()]),
-              const SizedBox(height: 6),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Flexible(child: _Metric(p.valor, BanorteColors.darkGray, size: 28)),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(meta == null ? p.detalle : 'de $meta · ${p.pct}',
-                          style: t.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
-                    ),
-                  ),
-                ],
+              Expanded(
+                flex: 5,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _Caps(p.w.title),
+                    const SizedBox(height: 2),
+                    _Metric(p.valor, BanorteColors.darkGray, size: 26),
+                    Text(meta == null ? p.detalle : 'de $meta · ${p.pct}',
+                        style: t.bodySmall?.copyWith(fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    ?p.chip(),
+                    const Spacer(),
+                    for (final f in p.lista('filas').take(2))
+                      _Fila(f['etiqueta'] as String, f['texto'] as String, compacta: true),
+                  ],
+                ),
               ),
-              const Spacer(),
-              _BarraMeta(p.progreso, p.proyectado, c),
-              const SizedBox(height: 6),
-              Row(children: [
-                Flexible(child: _Leyenda(c, 'Hoy ${p.valor}')),
-                const SizedBox(width: 10),
-                if (proyectado != null) Flexible(child: _Leyenda(c.withValues(alpha: 0.3), 'Proyectado $proyectado')),
-                const Spacer(),
-                if (meta != null) ...[
-                  const Icon(Icons.flag_rounded, size: 13, color: BanorteColors.darkGray),
-                  const SizedBox(width: 2),
-                  Text(meta,
-                      style: t.bodySmall
-                          ?.copyWith(fontSize: 11, color: BanorteColors.darkGray, fontWeight: FontWeight.w600)),
-                ],
-              ]),
+              const SizedBox(width: 12),
+              Expanded(
+                flex: 5,
+                child: serie.length > 1
+                    ? _Area(serie, p.etiquetasSerie, c, meta: (p.m['meta_valor'] as num?)?.toDouble())
+                    : Center(child: _BarraMeta(p.progreso, p.proyectado, c)),
+              ),
             ],
           ),
         );
@@ -184,7 +176,7 @@ class _Presupuesto extends StatelessWidget {
     final desglose = p.lista('desglose');
 
     switch (p.w.shape) {
-      // Disponible + chip de estado + mini barras de las categorías principales.
+      // Gauge semicircular del % gastado + disponible + chip de estado.
       case WidgetShape.square:
         return _DashboardCard(
           color: BanorteColors.darkGray,
@@ -192,21 +184,34 @@ class _Presupuesto extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(children: [
-                const Expanded(child: _Caps('Disponible', color: Colors.white60)),
+                const Expanded(child: _Caps('Presupuesto', color: Colors.white60)),
                 _StatusDot(color: c),
               ]),
-              const SizedBox(height: 6),
-              _Metric(p.valor, Colors.white, size: 28),
+              const SizedBox(height: 4),
+              Expanded(
+                child: _Gauge(p.progreso, Colors.white, Colors.white24,
+                    valor: p.pct, etiqueta: 'gastado', texto: Colors.white),
+              ),
+              // Un solo texto con dos estilos: escala junto y el monto no se encoge solo.
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text.rich(TextSpan(children: [
+                  TextSpan(
+                    text: p.valor,
+                    style: t.displaySmall?.copyWith(fontSize: 22, color: Colors.white),
+                  ),
+                  const TextSpan(text: '  disponible', style: TextStyle(fontSize: 11, color: Colors.white70)),
+                ])),
+              ),
               ?p.chip(sobreColor: true),
-              const Spacer(),
-              if (desglose.isNotEmpty) _MiniBarras(desglose.take(4).toList(), Colors.white),
             ],
           ),
         );
 
-      // Balance a la izquierda; dona de las 6 categorías con % gastado a la derecha.
+      // Balance + chip + 3 categorías principales a la izquierda; dona de las 6 a la derecha.
       case WidgetShape.wide:
-        final gastos = p.s('gastos_texto');
+        final chip = p.chip();
         return _DashboardCard(
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -221,29 +226,24 @@ class _Presupuesto extends StatelessWidget {
                       const SizedBox(width: 6),
                       _StatusDot(color: c),
                     ]),
-                    const SizedBox(height: 6),
-                    _Metric(p.valor, BanorteColors.darkGray, size: 28),
-                    ?p.chip(),
+                    const SizedBox(height: 4),
+                    Row(children: [
+                      Flexible(child: _Metric(p.valor, BanorteColors.darkGray, size: 26)),
+                      const SizedBox(width: 6),
+                      if (chip != null) Flexible(child: chip),
+                    ]),
                     const Spacer(),
-                    Text(gastos != null ? 'Gastas $gastos' : p.detalle,
-                        style: t.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    if (desglose.isEmpty)
+                      Text(p.detalle, style: t.bodySmall, maxLines: 2)
+                    else
+                      for (final (i, e) in desglose.take(3).indexed)
+                        _FilaCategoria(_paleta[i], e['nombre'] as String? ?? '', e['texto'] as String? ?? ''),
                   ],
                 ),
               ),
               if (desglose.isNotEmpty) ...[
                 const SizedBox(width: 12),
-                Expanded(
-                  flex: 4,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(child: _Dona(desglose, centro: p.pct)),
-                      const SizedBox(height: 4),
-                      for (final (i, e) in desglose.take(2).indexed)
-                        _Leyenda(_paleta[i], '${e['corto'] ?? ''} ${e['texto'] ?? ''}'),
-                    ],
-                  ),
-                ),
+                Expanded(flex: 4, child: _Dona(desglose, centro: p.pct)),
               ],
             ],
           ),
@@ -315,10 +315,9 @@ class _Inversion extends StatelessWidget {
           ),
         );
 
-      // Monto final + chip a la izquierda; instrumentos del portafolio a la derecha.
+      // Monto final, chip, perfil · plazo y aportado/ganancia a la izquierda; instrumentos a la derecha.
       case WidgetShape.wide:
         final instrumentos = p.lista('instrumentos');
-        final aportado = p.lista('filas').firstOrNull;
         return _DashboardCard(
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -329,13 +328,18 @@ class _Inversion extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const _Caps('Inversión'),
-                    const SizedBox(height: 6),
-                    _Metric(p.s('total') ?? p.valor, BanorteColors.darkGray, size: 28),
+                    const SizedBox(height: 2),
+                    _Metric(p.s('total') ?? p.valor, BanorteColors.darkGray, size: 26),
                     _Chip(p.valor, p.tono),
+                    if (p.s('perfil_texto') case final perfil?)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(perfil,
+                            style: t.bodySmall?.copyWith(fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      ),
                     const Spacer(),
-                    if (aportado != null)
-                      Text('${aportado['etiqueta']} ${aportado['texto']}',
-                          style: t.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    for (final f in p.lista('filas').take(2))
+                      _Fila(f['etiqueta'] as String, f['texto'] as String, compacta: true),
                   ],
                 ),
               ),
@@ -478,6 +482,28 @@ class _Leyenda extends StatelessWidget {
       );
 }
 
+/// Fila de categoría con punto del color de su segmento en la dona.
+class _FilaCategoria extends StatelessWidget {
+  const _FilaCategoria(this.color, this.nombre, this.texto);
+  final Color color;
+  final String nombre;
+  final String texto;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 12);
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(children: [
+        Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 6),
+        Expanded(child: Text(nombre, style: s, maxLines: 1, overflow: TextOverflow.ellipsis)),
+        Text(texto, style: s?.copyWith(color: BanorteColors.darkGray, fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+}
+
 class _Metric extends StatelessWidget {
   const _Metric(this.text, this.color, {this.size = 24});
   final String text;
@@ -584,6 +610,64 @@ class _AnilloDoble extends StatelessWidget {
       );
 }
 
+/// Gauge semicircular (ref. dashboards rojos) con valor y etiqueta dentro del arco.
+class _Gauge extends StatelessWidget {
+  const _Gauge(this.value, this.color, this.pista,
+      {required this.valor, required this.etiqueta, this.texto = BanorteColors.darkGray});
+  final double value;
+  final Color color;
+  final Color pista;
+  final String valor;
+  final String etiqueta;
+  final Color texto;
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: AspectRatio(
+          aspectRatio: 2,
+          child: CustomPaint(
+            painter: _ArcoPainter(value, color, pista),
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Text(valor,
+                      style: Theme.of(context).textTheme.displaySmall?.copyWith(fontSize: 20, color: texto)),
+                  Text(etiqueta, style: TextStyle(fontSize: 10, color: texto.withValues(alpha: 0.7))),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+class _ArcoPainter extends CustomPainter {
+  _ArcoPainter(this.value, this.color, this.pista);
+  final double value;
+  final Color color;
+  final Color pista;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final grosor = size.height * 0.16;
+    final rect = Rect.fromCircle(
+      center: Offset(size.width / 2, size.height - grosor / 2),
+      radius: min(size.width / 2 - grosor / 2, size.height - grosor),
+    );
+    final pincel = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = grosor
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(rect, pi, pi, false, pincel..color = pista);
+    if (value > 0) canvas.drawArc(rect, pi, pi * value.clamp(0.0, 1.0), false, pincel..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_ArcoPainter old) => old.value != value || old.color != color || old.pista != pista;
+}
+
 /// Dona de categorías (escalada a la suma) con texto al centro.
 class _Dona extends StatelessWidget {
   const _Dona(this.items, {required this.centro});
@@ -636,50 +720,6 @@ class _Dona extends StatelessWidget {
         ),
       );
     });
-  }
-}
-
-/// 4 barras simples para el cuadrado de presupuesto, relativas a la mayor.
-class _MiniBarras extends StatelessWidget {
-  const _MiniBarras(this.items, this.color);
-  final List<Map> items;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    final maxPct = items.fold<double>(0, (m, e) => max(m, (e['pct'] as num? ?? 0).toDouble()));
-    return SizedBox(
-      height: 58,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final e in items)
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 3),
-                child: Column(children: [
-                  Expanded(
-                    child: Align(
-                      alignment: Alignment.bottomCenter,
-                      child: FractionallySizedBox(
-                        widthFactor: 1,
-                        heightFactor: maxPct > 0 ? max(0.08, (e['pct'] as num? ?? 0) / maxPct) : 0.08,
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(4)),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(((e['corto'] as String?) ?? '').toUpperCase(),
-                      maxLines: 1,
-                      style: TextStyle(fontSize: 9, letterSpacing: 0.4, color: color.withValues(alpha: 0.7))),
-                ]),
-              ),
-            ),
-        ],
-      ),
-    );
   }
 }
 
@@ -769,17 +809,22 @@ class _Barras extends StatelessWidget {
 
 /// Área con gradiente, punto final resaltado y etiquetas de mes (primero / medio / último).
 class _Area extends StatelessWidget {
-  const _Area(this.serie, this.etiquetas, this.color, {this.ejes = true, this.relleno = true});
+  const _Area(this.serie, this.etiquetas, this.color, {this.ejes = true, this.relleno = true, this.meta});
   final List<double> serie;
   final List<String> etiquetas;
   final Color color;
   final bool ejes;
   final bool relleno;
 
+  /// Si viene: línea punteada en ese valor y el punto donde la serie la alcanza.
+  final double? meta;
+
   @override
   Widget build(BuildContext context) {
     final ultimo = serie.length - 1;
-    final lo = serie.reduce(min), hi = serie.reduce(max);
+    final lo = serie.reduce(min), hi = max(serie.reduce(max), meta ?? double.negativeInfinity);
+    // Con meta: punto donde el saldo la alcanza (ninguno si no llega); sin meta: punto final.
+    final punto = meta == null ? ultimo : serie.indexWhere((v) => v >= meta!);
     // Serie plana (datos extremos): margen artificial para que no colapse.
     final rango = hi > lo ? hi - lo : max(hi.abs() * 0.1, 1.0);
     const estilo = TextStyle(fontSize: 10, letterSpacing: 0.5, color: BanorteColors.content3);
@@ -788,6 +833,10 @@ class _Area extends StatelessWidget {
       LineChartData(
         minY: lo - rango * 0.05,
         maxY: hi + rango * 0.2,
+        extraLinesData: ExtraLinesData(horizontalLines: [
+          if (meta != null)
+            HorizontalLine(y: meta!, color: BanorteColors.content3, strokeWidth: 1, dashArray: const [4, 4]),
+        ]),
         gridData: const FlGridData(show: false),
         borderData: FlBorderData(show: false),
         lineTouchData: const LineTouchData(enabled: false),
@@ -820,7 +869,7 @@ class _Area extends StatelessWidget {
             color: color,
             barWidth: relleno ? 2.5 : 2,
             dotData: FlDotData(
-              checkToShowDot: (spot, _) => spot.x == ultimo,
+              checkToShowDot: (spot, _) => spot.x == punto,
               getDotPainter: (_, _, _, _) =>
                   FlDotCirclePainter(radius: 3.5, color: color, strokeWidth: 2, strokeColor: Colors.white),
             ),
@@ -840,15 +889,16 @@ class _Area extends StatelessWidget {
 }
 
 class _Fila extends StatelessWidget {
-  const _Fila(this.label, this.value);
+  const _Fila(this.label, this.value, {this.compacta = false});
   final String label;
   final String value;
+  final bool compacta;
 
   @override
   Widget build(BuildContext context) {
-    final s = Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 12);
+    final s = Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: compacta ? 11 : 12);
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 5),
+      padding: EdgeInsets.symmetric(vertical: compacta ? 2 : 5),
       decoration: const BoxDecoration(border: Border(top: BorderSide(color: BanorteColors.background2))),
       child: Row(children: [
         Expanded(child: Text(label, style: s, maxLines: 1, overflow: TextOverflow.ellipsis)),
