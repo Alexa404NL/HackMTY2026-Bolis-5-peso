@@ -112,6 +112,12 @@ class SurfaceView extends StatelessWidget {
       'ProyeccionAhorroSimple' || 'ProyeccionAhorroMulti' =>
         ProyeccionAhorro(key: ObjectKey(c), props: c, surface: surface),
       'ResumenMetaGuardada' => ResumenMetaGuardada(props: c),
+      // --- Presupuesto ---
+      'PlanPresupuesto' => PlanPresupuesto(key: ObjectKey(c), props: c, surface: surface),
+      'ResumenPresupuestoGuardado' => ResumenPresupuestoGuardado(props: c),
+      // --- Inversión ---
+      'PlanInversion' => PlanInversion(key: ObjectKey(c), props: c, surface: surface),
+      'ResumenInversionGuardada' => ResumenInversionGuardada(props: c),
       final other => UnknownComponent('"$other" no está en el catálogo'),
     };
   }

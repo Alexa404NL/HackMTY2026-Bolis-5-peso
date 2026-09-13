@@ -29,19 +29,20 @@ MAX_PASOS = 6
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", 2048))  # el agente solo emite tool calls y una frase corta
 LOG = AQUI / "data" / "turns.jsonl"
 
-SISTEMA = """Eres el agente de un simulador de ahorro de Banorte. Tu trabajo es ORQUESTAR herramientas:
+SISTEMA = """Eres el agente de un simulador de Banorte. Tu trabajo es ORQUESTAR herramientas:
 nunca redactes preguntas, nunca calcules ni inventes cifras. Toda la interfaz la generan las herramientas.
 
 Reglas según la entrada:
-1. Texto libre (la intención de la persona): llama get_next_question. Si la intención deja claro el objetivo
-   (Fondo de emergencia, Viaje, Enganche, Educación u Otro) o un monto meta en pesos, inclúyelos en `respuestas`
-   (campo "objetivo" / "monto_meta"). Si no, llámala sin respuestas.
-2. "ACCIÓN responder": llama get_next_question con respuestas=[{campo, valor}] exactamente como llegaron.
-3. Si get_next_question regresa completo=true, la proyección ya está en pantalla: no llames otra herramienta.
-   Usa simulate_projection solo si te piden volver a mostrar la proyección.
-4. "ACCIÓN editar_meta": llama update_savings_goal con cambios = los cambios recibidos.
-5. "ACCIÓN guardar_meta": llama save_savings_goal.
-El estado del perfilamiento y el id de la meta los maneja el sistema; no los envíes.
+1. Texto libre: llama get_next_question (ahorro), get_budget_questions (presupuesto), o get_investment_questions (inversión).
+2. "ACCIÓN responder": llama get_next_question con respuestas=[{campo, valor}].
+3. "ACCIÓN responder_budget": llama get_budget_questions con respuestas=[{campo, valor}].
+4. "ACCIÓN responder_investment": llama get_investment_questions con respuestas=[{campo, valor}].
+5. "ACCIÓN editar_meta": llama update_savings_goal con cambios = los cambios recibidos.
+6. "ACCIÓN guardar_meta": llama save_savings_goal.
+7. "ACCIÓN guardar_presupuesto": llama save_budget_plan.
+8. "ACCIÓN guardar_inversion": llama save_investment_plan.
+9. "ACCIÓN save_dashboard_layout": llama save_dashboard_config con widgets recibidos.
+El estado del perfilamiento se maneja internamente; no lo envíes.
 Al terminar, responde con UNA frase corta y cálida en español (máximo 15 palabras), sin cifras."""
 
 llm = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ["API_ROUTER"])
@@ -133,6 +134,11 @@ async def turn(t: Turno):
         entrada = f"ACCIÓN {t.action.get('name')}: {json.dumps(visible, ensure_ascii=False)}"
     else:
         entrada = t.texto
+
+    if entrada == "__get_dashboard__":
+        res = await app.state.mcp.call_tool("get_dashboard_config", {})
+        texto, ui = _leer_resultado(res)
+        return {"messages": _con_mensaje(ui, "")}
 
     inicio = len(conv["mensajes"])
     conv["mensajes"].append({"role": "user", "content": entrada})
